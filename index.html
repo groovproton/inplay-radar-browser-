@@ -1,0 +1,2221 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Binance Action Indicator</title>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+
+            background: #0b0e11;
+            color: #eaecef;
+
+            font-family:
+                ui-monospace,
+                SFMono-Regular,
+                Menlo,
+                Monaco,
+                Consolas,
+                monospace;
+        }
+
+        h1 {
+            margin-top: 0;
+        }
+
+        #status {
+            margin-bottom: 16px;
+            color: #848e9c;
+        }
+
+        h2 {
+            margin: 24px 0 8px;
+            font-size: 18px;
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+        }
+
+        details {
+            margin-top: 24px;
+        }
+
+        summary {
+            margin-bottom: 8px;
+            color: #b7bdc6;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            padding: 8px 10px;
+            border-bottom: 1px solid #1e2329;
+            text-align: right;
+        }
+
+        th:first-child,
+        td:first-child,
+        th:nth-child(2),
+        td:nth-child(2),
+        th:nth-last-child(2),
+        td:nth-last-child(2),
+        th:last-child,
+        td:last-child {
+            text-align: left;
+        }
+
+        th {
+            position: sticky;
+            top: 0;
+
+            background: #181a20;
+        }
+
+        tr:hover {
+            background: #181a20;
+        }
+
+        .quiet {
+            color: #848e9c;
+        }
+
+        .collecting {
+            color: #848e9c;
+        }
+
+        .waking {
+            color: #f0b90b;
+        }
+
+        .active {
+            color: #2ebd85;
+        }
+
+        .expanding {
+            color: #00ff9d;
+            font-weight: bold;
+        }
+
+        .negative {
+            color: #f6465d;
+        }
+
+        .positive {
+            color: #0ecb81;
+        }
+
+        .empty {
+            color: #848e9c;
+            text-align: center;
+        }
+
+        #activeTable th:nth-last-child(4),
+        #activeTable td:nth-last-child(4),
+        #activeTable th:nth-last-child(3),
+        #activeTable td:nth-last-child(3) {
+            text-align: left;
+        }
+    </style>
+</head>
+
+<body>
+
+<h1>Binance Action Indicator</h1>
+
+<div id="status">
+    Connecting...
+</div>
+
+<h2 id="activeHeading">Active Coins (0)</h2>
+
+<div class="table-wrap">
+<table id="activeTable">
+    <thead>
+    <tr>
+        <th>#</th>
+        <th>Symbol</th>
+
+        <th>Score</th>
+        <th>State Score</th>
+
+        <th>Price</th>
+        <th>Δ 10s</th>
+        <th>Δ 30s</th>
+        <th>Δ 60s</th>
+
+        <th>Quote Vol Ratio</th>
+        <th>AggTrade Ratio</th>
+
+        <th>Acceleration</th>
+
+        <th>State</th>
+        <th>Confidence</th>
+        <th>Active Since</th>
+        <th>Last Active</th>
+    </tr>
+    </thead>
+
+    <tbody id="activeRows"></tbody>
+</table>
+</div>
+
+<details>
+    <summary id="candidatesSummary">All Candidates (0)</summary>
+
+    <div class="table-wrap">
+    <table>
+        <thead>
+        <tr>
+            <th>#</th>
+            <th>Symbol</th>
+
+            <th>Score</th>
+            <th>State Score</th>
+
+            <th>Price</th>
+            <th>Δ 10s</th>
+            <th>Δ 30s</th>
+            <th>Δ 60s</th>
+
+            <th>Quote Vol Ratio</th>
+            <th>AggTrade Ratio</th>
+
+            <th>Acceleration</th>
+
+            <th>State</th>
+            <th>Confidence</th>
+        </tr>
+        </thead>
+
+        <tbody id="candidateRows"></tbody>
+    </table>
+    </div>
+</details>
+
+<script>
+"use strict";
+
+//
+// ============================================================
+// CONFIG
+// ============================================================
+//
+
+const CONFIG = {
+    discoveryWsUrl:
+        "wss://stream.binance.com:9443/ws/!ticker_1d@arr",
+
+    activityWsUrl:
+        "wss://stream.binance.com:9443/stream",
+
+    quoteAsset:
+        "USDT",
+
+    renderIntervalMs:
+        500,
+
+    maxRows:
+        50,
+
+    activeTable: {
+        ttlMs: 5 * 60_000,
+        cleanupIntervalMs: 5_000
+    },
+
+    historyMs:
+        120_000,
+
+    activityHistoryMs:
+        120_000,
+
+    snapshotToleranceMs:
+        2_500,
+
+    minimumQuoteVolume1d:
+        500_000,
+
+    candidateEnterCount:
+        50,
+
+    candidateExitRank:
+        70,
+
+    candidateMinResidenceMs:
+        60_000,
+
+    candidateRefreshMs:
+        10_000,
+
+    diagnosticIntervalMs:
+        10_000,
+
+    reconnectInitialMs:
+        2_000,
+
+    reconnectMaxMs:
+        30_000,
+
+    reconnectJitter:
+        0.2,
+
+    maxVolumeRatioForScore:
+        5,
+
+    maxAggTradeRatioForScore:
+        5,
+
+    state: {
+        wakingEnter:       3,
+        wakingExit:        2,
+        activeEnter:       7,
+        activeExit:        5,
+        expandingEnter:   15,
+        expandingExit:    10,
+
+        stateScoreAlpha: 0.20,
+
+        upgradeConfirmMs:   2_000,
+        downgradeConfirmMs: 8_000,
+
+        minimumStateHoldMs:          10_000,
+        expandingMinimumStateHoldMs: 15_000
+    },
+
+    //
+    // Score weights.
+    //
+    score: {
+        move10s:      4.0,
+        move30s:      3.0,
+        move60s:      2.0,
+
+        acceleration: 4.0,
+
+        volume:       2.0,
+        aggTrades:    1.5
+    }
+};
+
+
+//
+// ============================================================
+// STATE
+// ============================================================
+//
+
+const symbols = new Map();
+const activeCoins = new Map();
+
+let candidateSymbols = new Set();
+let activitySubscriptions = new Set();
+
+let discoverySocket = null;
+let activitySocket = null;
+
+let discoveryReconnectTimer = null;
+let activityReconnectTimer = null;
+
+let discoveryRetryCount = 0;
+let activityRetryCount = 0;
+
+let subscriptionRequestId = 1;
+let lastCandidateRefreshAt = 0;
+
+const diagnostics = {
+    discoveryMessages: 0,
+    aggTradeMessages: 0
+};
+
+
+//
+// ============================================================
+// UTILITIES
+// ============================================================
+//
+
+function percentChange(oldValue, newValue) {
+    if (!oldValue || oldValue === 0) {
+        return 0;
+    }
+
+    return ((newValue - oldValue) / oldValue) * 100;
+}
+
+
+function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+}
+
+
+function formatPercent(value) {
+    const sign = value > 0 ? "+" : "";
+
+    return sign + value.toFixed(3) + "%";
+}
+
+
+function formatNumber(value) {
+    if (value >= 1_000_000_000) {
+        return (value / 1_000_000_000).toFixed(2) + "B";
+    }
+
+    if (value >= 1_000_000) {
+        return (value / 1_000_000).toFixed(2) + "M";
+    }
+
+    if (value >= 1_000) {
+        return (value / 1_000).toFixed(2) + "K";
+    }
+
+    return value.toFixed(0);
+}
+
+
+function formatPrice(value) {
+    if (value >= 1000) {
+        return value.toFixed(2);
+    }
+
+    if (value >= 1) {
+        return value.toFixed(4);
+    }
+
+    if (value >= 0.01) {
+        return value.toFixed(6);
+    }
+
+    return value.toFixed(8);
+}
+
+
+function formatOptional(value, formatter) {
+    return Number.isFinite(value)
+        ? formatter(value)
+        : "—";
+}
+
+
+function formatAge(ms) {
+    const totalSeconds =
+        Math.floor(Math.max(0, ms) / 1000);
+
+    if (totalSeconds < 1) {
+        return "now";
+    }
+
+    if (totalSeconds < 60) {
+        return `${totalSeconds}s`;
+    }
+
+    const minutes =
+        Math.floor(totalSeconds / 60);
+
+    const seconds =
+        String(totalSeconds % 60).padStart(2, "0");
+
+    return `${minutes}m ${seconds}s`;
+}
+
+
+function formatLastActive(ms) {
+    const age = formatAge(ms);
+
+    return age === "now"
+        ? age
+        : `${age} ago`;
+}
+
+
+//
+// ============================================================
+// HISTORY
+// ============================================================
+//
+
+function createSymbol(symbol) {
+    return {
+        symbol,
+
+        lastPrice: 0,
+
+        rollingQuoteVolume: 0,
+        rollingChangePercent: 0,
+
+        history: [],
+
+        activityEvents: [],
+        activityHead: 0,
+        activityStartedAt: null,
+        activityUnsubscribedAt: null,
+        activityQuoteTotal: 0,
+        activityEventTotal: 0,
+
+        candidateEnteredAt: null,
+
+        rawScore: null,
+        stateScore: null,
+
+        marketState: "QUIET",
+        stateChangedAt: null,
+        pendingState: null,
+        pendingStateSince: null,
+
+        metrics: null
+    };
+}
+
+
+function addSnapshot(item, now) {
+    item.history.push({
+        time: now,
+        price: item.lastPrice
+    });
+
+    const cutoff =
+        now - CONFIG.historyMs;
+
+    while (
+        item.history.length > 0 &&
+        item.history[0].time < cutoff
+    ) {
+        item.history.shift();
+    }
+}
+
+
+function snapshotAt(item, ageMs, now) {
+    const target =
+        now - ageMs;
+
+    let best = null;
+    let bestError = Infinity;
+
+    for (let i = 0; i < item.history.length; i++) {
+        const snapshot =
+            item.history[i];
+
+        const error =
+            Math.abs(snapshot.time - target);
+
+        if (error < bestError) {
+            best = snapshot;
+            bestError = error;
+        }
+    }
+
+    return bestError <= CONFIG.snapshotToleranceMs
+        ? best
+        : null;
+}
+
+
+function resetActivity(item, now = null) {
+    item.activityEvents = [];
+    item.activityHead = 0;
+    item.activityStartedAt = now;
+    item.activityUnsubscribedAt = null;
+    item.activityQuoteTotal = 0;
+    item.activityEventTotal = 0;
+
+    item.rawScore = null;
+    item.stateScore = null;
+
+    item.marketState = "QUIET";
+    item.stateChangedAt = now;
+    item.pendingState = null;
+    item.pendingStateSince = null;
+}
+
+
+function pruneActivity(item, now) {
+    const cutoff =
+        now - CONFIG.activityHistoryMs;
+
+    while (
+        item.activityHead < item.activityEvents.length &&
+        item.activityEvents[item.activityHead].receivedAt < cutoff
+    ) {
+        item.activityHead++;
+    }
+
+    if (
+        item.activityHead >= 1_000 &&
+        item.activityHead * 2 >= item.activityEvents.length
+    ) {
+        item.activityEvents =
+            item.activityEvents.slice(item.activityHead);
+
+        item.activityHead = 0;
+    }
+}
+
+
+function addActivityEvent(item, event) {
+    item.activityQuoteTotal +=
+        event.quoteVolume;
+
+    item.activityEventTotal++;
+
+    item.activityEvents.push({
+        ...event,
+        cumulativeQuoteVolume:
+            item.activityQuoteTotal,
+        cumulativeAggTrades:
+            item.activityEventTotal
+    });
+
+    pruneActivity(
+        item,
+        event.receivedAt
+    );
+}
+
+
+function firstActivityIndexAtOrAfter(item, cutoff) {
+    let low = item.activityHead;
+    let high = item.activityEvents.length;
+
+    while (low < high) {
+        const middle =
+            Math.floor((low + high) / 2);
+
+        if (
+            item.activityEvents[middle].receivedAt < cutoff
+        ) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+
+    return low;
+}
+
+
+function activityTotalsSince(item, cutoff) {
+    const firstIndex =
+        firstActivityIndexAtOrAfter(
+            item,
+            cutoff
+        );
+
+    if (firstIndex >= item.activityEvents.length) {
+        return {
+            quoteVolume: 0,
+            aggTrades: 0
+        };
+    }
+
+    const first =
+        item.activityEvents[firstIndex];
+
+    const last =
+        item.activityEvents[item.activityEvents.length - 1];
+
+    return {
+        quoteVolume:
+            last.cumulativeQuoteVolume -
+            first.cumulativeQuoteVolume +
+            first.quoteVolume,
+
+        aggTrades:
+            last.cumulativeAggTrades -
+            first.cumulativeAggTrades +
+            1
+    };
+}
+
+
+//
+// ============================================================
+// METRICS
+// ============================================================
+//
+
+function activityRatio(
+    recentActivity,
+    totalActivity,
+    baselineDurationMs
+) {
+    const previousActivity =
+        Math.max(
+            0,
+            totalActivity - recentActivity
+        );
+
+    const averagePrevious10s =
+        baselineDurationMs > 0
+            ? previousActivity /
+                (baselineDurationMs / 10_000)
+            : 0;
+
+    if (averagePrevious10s > 0) {
+        return recentActivity / averagePrevious10s;
+    }
+
+    // Activity without a prior baseline is observable, but it is
+    // not enough evidence to award an excess-activity bonus.
+    return recentActivity > 0 ? 1 : 0;
+}
+
+
+function calculateMetrics(item, now) {
+    pruneActivity(item, now);
+
+    const observationAge =
+        item.activityStartedAt === null
+            ? 0
+            : Math.max(
+                0,
+                now - item.activityStartedAt
+            );
+
+    const s10 =
+        snapshotAt(item, 10_000, now);
+
+    const s30 =
+        snapshotAt(item, 30_000, now);
+
+    const s60 =
+        snapshotAt(item, 60_000, now);
+
+    const has10 =
+        observationAge >= 10_000 &&
+        s10 !== null;
+
+    const has30 =
+        observationAge >= 30_000 &&
+        s30 !== null;
+
+    const has60 =
+        observationAge >= 60_000 &&
+        s60 !== null;
+
+    const confidence =
+        has60 && has30 && has10
+            ? "FULL"
+            : has30 && has10
+                ? "MED"
+                : has10
+                    ? "LOW"
+                    : "WARMUP";
+
+    const move10 =
+        has10
+            ? percentChange(
+                s10.price,
+                item.lastPrice
+            )
+            : null;
+
+    const move30 =
+        has30
+            ? percentChange(
+                s30.price,
+                item.lastPrice
+            )
+            : null;
+
+    const move60 =
+        has60
+            ? percentChange(
+                s60.price,
+                item.lastPrice
+            )
+            : null;
+
+    const activity10 =
+        activityTotalsSince(
+            item,
+            now - 10_000
+        );
+
+    const baselineDurationMs =
+        Math.min(
+            50_000,
+            Math.max(
+                0,
+                observationAge - 10_000
+            )
+        );
+
+    const activityWindow =
+        activityTotalsSince(
+            item,
+            now - 10_000 - baselineDurationMs
+        );
+
+    const volume10 =
+        activity10.quoteVolume;
+
+    const volumeWindow =
+        activityWindow.quoteVolume;
+
+    const aggTrades10 =
+        activity10.aggTrades;
+
+    const aggTradesWindow =
+        activityWindow.aggTrades;
+
+    //
+    // Price velocity:
+    //
+    // % per second.
+    //
+
+    const velocity10 =
+        move10 === null
+            ? null
+            : move10 / 10;
+
+    const velocity30 =
+        move30 === null
+            ? null
+            : move30 / 30;
+
+    //
+    // Acceleration:
+    //
+    // recent velocity versus slower velocity.
+    //
+
+    const acceleration =
+        velocity10 === null ||
+        velocity30 === null
+            ? null
+            : Math.abs(velocity10) -
+                Math.abs(velocity30);
+
+    //
+    // Activity acceleration.
+    //
+    // Latest 10s versus average 10s activity during the
+    // available prior window. At FULL confidence this is
+    // exactly the previous 50 seconds.
+    //
+
+    const volumeRatio =
+        activityRatio(
+            volume10,
+            volumeWindow,
+            baselineDurationMs
+        );
+
+    const aggTradeRatio =
+        activityRatio(
+            aggTrades10,
+            aggTradesWindow,
+            baselineDurationMs
+        );
+
+    const scoreComponents =
+        confidence === "WARMUP"
+            ? null
+            : calculateScore({
+                move10,
+                move30,
+                move60,
+
+                acceleration,
+
+                volumeRatio,
+                aggTradeRatio
+            });
+
+    return {
+        move10,
+        move30,
+        move60,
+
+        velocity10,
+        acceleration,
+
+        volume10,
+        aggTrades10,
+
+        volumeRatio,
+        aggTradeRatio,
+
+        confidence,
+        observationAge,
+
+        score:
+            scoreComponents?.total ?? null,
+        scoreComponents
+    };
+}
+
+
+//
+// ============================================================
+// ACTION SCORE
+// ============================================================
+//
+
+function calculateScore(m) {
+    //
+    // Direction does NOT matter here.
+    //
+    // +5% pump and -5% dump are both ACTION.
+    //
+
+    let movementScore = 0;
+
+    if (Number.isFinite(m.move10)) {
+        movementScore +=
+            Math.abs(m.move10) *
+            CONFIG.score.move10s;
+    }
+
+    if (Number.isFinite(m.move30)) {
+        movementScore +=
+            Math.abs(m.move30) *
+            CONFIG.score.move30s;
+    }
+
+    if (Number.isFinite(m.move60)) {
+        movementScore +=
+            Math.abs(m.move60) *
+            CONFIG.score.move60s;
+    }
+
+
+    //
+    // Only positive acceleration is interesting.
+    //
+
+    const accelerationScore =
+        Number.isFinite(m.acceleration)
+            ? Math.max(0, m.acceleration)
+                * 100
+                * CONFIG.score.acceleration
+            : null;
+
+
+    //
+    // Ratios around 1 are normal.
+    //
+    // We score only excess activity.
+    //
+
+    const effectiveVolumeRatio =
+        Math.min(
+            m.volumeRatio,
+            CONFIG.maxVolumeRatioForScore
+        );
+
+    const volumeScore =
+        Math.max(
+            0,
+            effectiveVolumeRatio - 1
+        )
+        * CONFIG.score.volume;
+
+
+    const effectiveAggTradeRatio =
+        Math.min(
+            m.aggTradeRatio,
+            CONFIG.maxAggTradeRatioForScore
+        );
+
+    const aggTradesScore =
+        Math.max(
+            0,
+            effectiveAggTradeRatio - 1
+        )
+        * CONFIG.score.aggTrades;
+
+
+    const total =
+        movementScore +
+        (accelerationScore ?? 0) +
+        volumeScore +
+        aggTradesScore;
+
+    return {
+        total,
+        movement: movementScore,
+        acceleration: accelerationScore,
+        volume: volumeScore,
+        aggTrades: aggTradesScore
+    };
+}
+
+
+//
+// ============================================================
+// MARKET STATE
+// ============================================================
+//
+
+const MARKET_STATE_ORDER = [
+    "QUIET",
+    "WAKING",
+    "ACTIVE",
+    "EXPANDING"
+];
+
+
+function updateStateScore(item, rawScore) {
+    item.rawScore =
+        Number.isFinite(rawScore)
+            ? rawScore
+            : null;
+
+    if (!Number.isFinite(rawScore)) {
+        return;
+    }
+
+    if (!Number.isFinite(item.stateScore)) {
+        item.stateScore = rawScore;
+        return;
+    }
+
+    const alpha = CONFIG.state.stateScoreAlpha;
+
+    item.stateScore =
+        alpha * rawScore +
+        (1 - alpha) * item.stateScore;
+}
+
+
+function allowedMaxStateForConfidence(confidence) {
+    switch (confidence) {
+        case "LOW":
+            return "WAKING";
+
+        case "MED":
+            return "ACTIVE";
+
+        case "FULL":
+            return "EXPANDING";
+
+        default:
+            return "QUIET";
+    }
+}
+
+
+function desiredStateFromStateScore(
+    currentState,
+    stateScore,
+    confidence
+) {
+    let desiredState;
+
+    switch (currentState) {
+        case "QUIET":
+            desiredState =
+                stateScore >= CONFIG.state.wakingEnter
+                ? "WAKING"
+                : "QUIET";
+            break;
+
+        case "WAKING":
+            if (stateScore >= CONFIG.state.activeEnter) {
+                desiredState = "ACTIVE";
+            } else {
+                desiredState =
+                    stateScore < CONFIG.state.wakingExit
+                        ? "QUIET"
+                        : "WAKING";
+            }
+            break;
+
+        case "ACTIVE":
+            if (stateScore >= CONFIG.state.expandingEnter) {
+                desiredState = "EXPANDING";
+            } else {
+                desiredState =
+                    stateScore < CONFIG.state.activeExit
+                        ? "WAKING"
+                        : "ACTIVE";
+            }
+            break;
+
+        case "EXPANDING":
+            desiredState =
+                stateScore < CONFIG.state.expandingExit
+                    ? "ACTIVE"
+                    : "EXPANDING";
+            break;
+
+        default:
+            desiredState = "QUIET";
+    }
+
+    const currentIndex =
+        MARKET_STATE_ORDER.indexOf(currentState);
+
+    const maximumIndex =
+        MARKET_STATE_ORDER.indexOf(
+            allowedMaxStateForConfidence(confidence)
+        );
+
+    const cappedIndex =
+        Math.min(
+            MARKET_STATE_ORDER.indexOf(desiredState),
+            maximumIndex
+        );
+
+    if (cappedIndex > currentIndex) {
+        return MARKET_STATE_ORDER[currentIndex + 1];
+    }
+
+    if (cappedIndex < currentIndex) {
+        return MARKET_STATE_ORDER[currentIndex - 1];
+    }
+
+    return currentState;
+}
+
+
+function updateMarketState(item, metrics, now) {
+    if (
+        metrics.confidence === "WARMUP" ||
+        !Number.isFinite(item.stateScore)
+    ) {
+        item.pendingState = null;
+        item.pendingStateSince = null;
+        return;
+    }
+
+    const desiredState =
+        desiredStateFromStateScore(
+            item.marketState,
+            item.stateScore,
+            metrics.confidence
+        );
+
+    if (desiredState === item.marketState) {
+        item.pendingState = null;
+        item.pendingStateSince = null;
+        return;
+    }
+
+    const currentIndex =
+        MARKET_STATE_ORDER.indexOf(item.marketState);
+
+    const desiredIndex =
+        MARKET_STATE_ORDER.indexOf(desiredState);
+
+    const isUpgrade =
+        desiredIndex > currentIndex;
+
+    if (!isUpgrade) {
+        const minimumHoldMs =
+            item.marketState === "EXPANDING"
+                ? CONFIG.state
+                    .expandingMinimumStateHoldMs
+                : CONFIG.state.minimumStateHoldMs;
+
+        const stateAgeMs =
+            item.stateChangedAt === null
+                ? Infinity
+                : now - item.stateChangedAt;
+
+        if (stateAgeMs < minimumHoldMs) {
+            item.pendingState = null;
+            item.pendingStateSince = null;
+            return;
+        }
+    }
+
+    if (item.pendingState !== desiredState) {
+        item.pendingState = desiredState;
+        item.pendingStateSince = now;
+        return;
+    }
+
+    const confirmationMs =
+        isUpgrade
+            ? CONFIG.state.upgradeConfirmMs
+            : CONFIG.state.downgradeConfirmMs;
+
+    if (
+        now - item.pendingStateSince <
+        confirmationMs
+    ) {
+        return;
+    }
+
+    item.marketState = desiredState;
+    item.stateChangedAt = now;
+    item.pendingState = null;
+    item.pendingStateSince = null;
+}
+
+
+function stateClass(state) {
+    return state.toLowerCase();
+}
+
+
+//
+// ============================================================
+// BINANCE
+// ============================================================
+//
+
+function parseWebSocketJson(source, text) {
+    try {
+        return JSON.parse(text);
+    } catch (error) {
+        console.error(
+            `${source} JSON parse error`,
+            error.message
+        );
+
+        return null;
+    }
+}
+
+
+function reconnectDelay(retryCount) {
+    const base =
+        Math.min(
+            CONFIG.reconnectInitialMs *
+                (2 ** retryCount),
+            CONFIG.reconnectMaxMs
+        );
+
+    const jitter =
+        base * CONFIG.reconnectJitter;
+
+    return Math.round(
+        base - jitter +
+        Math.random() * jitter * 2
+    );
+}
+
+
+function updateStatus() {
+    const discoveryConnected =
+        discoverySocket?.readyState === WebSocket.OPEN;
+
+    const activityConnected =
+        activitySocket?.readyState === WebSocket.OPEN;
+
+    document.getElementById("status").textContent =
+        `Discovery ${discoveryConnected ? "connected" : "disconnected"}` +
+        ` | Activity ${activityConnected ? "connected" : "disconnected"}` +
+        ` | Candidates ${candidateSymbols.size}` +
+        ` | Subscribed ${activitySubscriptions.size}` +
+        ` | Active ${activeCoins.size}`;
+}
+
+
+function scheduleDiscoveryReconnect() {
+    if (discoveryReconnectTimer !== null) {
+        return;
+    }
+
+    const delay =
+        reconnectDelay(discoveryRetryCount++);
+
+    console.info(
+        "Discovery reconnect",
+        `${delay}ms`
+    );
+
+    discoveryReconnectTimer =
+        setTimeout(() => {
+            discoveryReconnectTimer = null;
+            connectDiscovery();
+        }, delay);
+}
+
+
+function scheduleActivityReconnect() {
+    if (activityReconnectTimer !== null) {
+        return;
+    }
+
+    const delay =
+        reconnectDelay(activityRetryCount++);
+
+    console.info(
+        "Activity reconnect",
+        `${delay}ms`
+    );
+
+    activityReconnectTimer =
+        setTimeout(() => {
+            activityReconnectTimer = null;
+            connectActivity();
+        }, delay);
+}
+
+
+function candidateScore(item, now) {
+    const recentSnapshot =
+        snapshotAt(item, 10_000, now);
+
+    const recentMove =
+        recentSnapshot
+            ? Math.abs(
+                percentChange(
+                    recentSnapshot.price,
+                    item.lastPrice
+                )
+            )
+            : 0;
+
+    return (
+        Math.log10(
+            Math.max(item.rollingQuoteVolume, 1)
+        ) +
+        recentMove * 8 +
+        Math.min(
+            Math.abs(item.rollingChangePercent),
+            20
+        ) * 0.05
+    );
+}
+
+
+function updateCandidates(now) {
+    if (
+        now - lastCandidateRefreshAt <
+        CONFIG.candidateRefreshMs
+    ) {
+        return;
+    }
+
+    lastCandidateRefreshAt = now;
+
+    for (const item of symbols.values()) {
+        if (
+            item.activityUnsubscribedAt !== null &&
+            now - item.activityUnsubscribedAt >
+                CONFIG.activityHistoryMs
+        ) {
+            resetActivity(item);
+        }
+    }
+
+    const ranked =
+        [...symbols.values()]
+            .filter(item =>
+                item.rollingQuoteVolume >=
+                CONFIG.minimumQuoteVolume1d
+            )
+            .sort(
+                (a, b) =>
+                    candidateScore(b, now) -
+                    candidateScore(a, now)
+            );
+
+    const rankBySymbol =
+        new Map(
+            ranked.map(
+                (item, index) => [
+                    item.symbol,
+                    index + 1
+                ]
+            )
+        );
+
+    const nextCandidates = new Set();
+
+    // Existing candidates use the wider exit rank. New candidates
+    // can enter only through the narrower enter rank.
+    for (const symbol of candidateSymbols) {
+        const item = symbols.get(symbol);
+        const rank = rankBySymbol.get(symbol);
+
+        if (!item || rank === undefined) {
+            continue;
+        }
+
+        const residenceMs =
+            item.candidateEnteredAt === null
+                ? 0
+                : now - item.candidateEnteredAt;
+
+        if (
+            rank <= CONFIG.candidateExitRank ||
+            residenceMs < CONFIG.candidateMinResidenceMs
+        ) {
+            nextCandidates.add(symbol);
+        }
+    }
+
+    for (
+        let index = 0;
+        index < Math.min(
+            CONFIG.candidateEnterCount,
+            ranked.length
+        );
+        index++
+    ) {
+        if (
+            nextCandidates.size >=
+            CONFIG.candidateExitRank
+        ) {
+            break;
+        }
+
+        nextCandidates.add(
+            ranked[index].symbol
+        );
+    }
+
+    for (const symbol of candidateSymbols) {
+        if (!nextCandidates.has(symbol)) {
+            const item = symbols.get(symbol);
+
+            if (item) {
+                item.candidateEnteredAt = null;
+            }
+        }
+    }
+
+    for (const symbol of nextCandidates) {
+        if (!candidateSymbols.has(symbol)) {
+            const item = symbols.get(symbol);
+
+            if (item) {
+                item.candidateEnteredAt = now;
+            }
+        }
+    }
+
+    candidateSymbols = nextCandidates;
+    syncActivitySubscriptions();
+}
+
+
+function sendSubscriptionChange(method, symbolsToChange) {
+    if (symbolsToChange.length === 0) {
+        return;
+    }
+
+    activitySocket.send(
+        JSON.stringify({
+            method,
+            params:
+                symbolsToChange.map(symbol =>
+                    `${symbol.toLowerCase()}@aggTrade`
+                ),
+            id: subscriptionRequestId++
+        })
+    );
+}
+
+
+function syncActivitySubscriptions() {
+    if (
+        !activitySocket ||
+        activitySocket.readyState !== WebSocket.OPEN
+    ) {
+        return;
+    }
+
+    const added =
+        [...candidateSymbols].filter(
+            symbol =>
+                !activitySubscriptions.has(symbol)
+        );
+
+    const removed =
+        [...activitySubscriptions].filter(
+            symbol =>
+                !candidateSymbols.has(symbol)
+        );
+
+    sendSubscriptionChange(
+        "UNSUBSCRIBE",
+        removed
+    );
+
+    sendSubscriptionChange(
+        "SUBSCRIBE",
+        added
+    );
+
+    const now = Date.now();
+
+    for (const symbol of removed) {
+        activitySubscriptions.delete(symbol);
+
+        const item = symbols.get(symbol);
+
+        if (item) {
+            pruneActivity(item, now);
+            item.activityUnsubscribedAt = now;
+        }
+    }
+
+    for (const symbol of added) {
+        activitySubscriptions.add(symbol);
+
+        const item = symbols.get(symbol);
+
+        if (item) {
+            pruneActivity(item, now);
+
+            const canReuseHistory =
+                item.activityStartedAt !== null &&
+                item.activityUnsubscribedAt !== null &&
+                now - item.activityUnsubscribedAt <=
+                    CONFIG.activityHistoryMs;
+
+            if (!canReuseHistory) {
+                resetActivity(item, now);
+            } else {
+                item.activityUnsubscribedAt = null;
+            }
+        }
+    }
+
+    if (added.length > 0 || removed.length > 0) {
+        console.info(
+            "Activity subscriptions changed",
+            {
+                subscribe: added.length,
+                unsubscribe: removed.length,
+                total: activitySubscriptions.size
+            }
+        );
+    }
+
+    updateStatus();
+}
+
+
+function connectDiscovery() {
+    if (
+        discoverySocket &&
+        (
+            discoverySocket.readyState === WebSocket.CONNECTING ||
+            discoverySocket.readyState === WebSocket.OPEN
+        )
+    ) {
+        return;
+    }
+
+    let receivedFirstMessage = false;
+
+    const socket =
+        new WebSocket(CONFIG.discoveryWsUrl);
+
+    discoverySocket = socket;
+
+    socket.onopen = () => {
+        if (discoverySocket !== socket) {
+            return;
+        }
+
+        discoveryRetryCount = 0;
+
+        console.info(
+            "Discovery socket open",
+            CONFIG.discoveryWsUrl
+        );
+
+        updateStatus();
+    };
+
+    socket.onmessage = event => {
+        if (discoverySocket !== socket) {
+            return;
+        }
+
+        const data =
+            parseWebSocketJson(
+                "Discovery socket",
+                event.data
+            );
+
+        if (data === null) {
+            return;
+        }
+
+        diagnostics.discoveryMessages++;
+
+        if (!receivedFirstMessage) {
+            receivedFirstMessage = true;
+
+            console.info(
+                "Discovery first message",
+                Array.isArray(data)
+                    ? `${data.length} tickers`
+                    : data
+            );
+        }
+
+        if (!Array.isArray(data)) {
+            return;
+        }
+
+        const now = Date.now();
+
+        for (const ticker of data) {
+            const symbol = ticker.s;
+
+            if (
+                !symbol ||
+                !symbol.endsWith(CONFIG.quoteAsset)
+            ) {
+                continue;
+            }
+
+            const lastPrice =
+                Number(ticker.c);
+
+            const rollingQuoteVolume =
+                Number(ticker.q);
+
+            const rollingChangePercent =
+                Number(ticker.P);
+
+            if (
+                !Number.isFinite(lastPrice) ||
+                !Number.isFinite(rollingQuoteVolume)
+            ) {
+                continue;
+            }
+
+            let item = symbols.get(symbol);
+
+            if (!item) {
+                item = createSymbol(symbol);
+                symbols.set(symbol, item);
+            }
+
+            item.lastPrice = lastPrice;
+            item.rollingQuoteVolume =
+                rollingQuoteVolume;
+            item.rollingChangePercent =
+                Number.isFinite(rollingChangePercent)
+                    ? rollingChangePercent
+                    : 0;
+
+            addSnapshot(item, now);
+        }
+
+        updateCandidates(now);
+    };
+
+    socket.onerror = error => {
+        if (discoverySocket !== socket) {
+            return;
+        }
+
+        document.getElementById("status").textContent =
+            "Discovery WebSocket error";
+
+        console.error(
+            "Discovery socket error",
+            error
+        );
+    };
+
+    socket.onclose = event => {
+        if (discoverySocket !== socket) {
+            return;
+        }
+
+        console.info(
+            "Discovery socket close",
+            event.code,
+            event.reason || "(no reason)"
+        );
+
+        discoverySocket = null;
+        updateStatus();
+        scheduleDiscoveryReconnect();
+    };
+}
+
+
+function connectActivity() {
+    if (
+        activitySocket &&
+        (
+            activitySocket.readyState === WebSocket.CONNECTING ||
+            activitySocket.readyState === WebSocket.OPEN
+        )
+    ) {
+        return;
+    }
+
+    let receivedFirstMessage = false;
+
+    const socket =
+        new WebSocket(CONFIG.activityWsUrl);
+
+    activitySocket = socket;
+
+    socket.onopen = () => {
+        if (activitySocket !== socket) {
+            return;
+        }
+
+        activityRetryCount = 0;
+        activitySubscriptions.clear();
+
+        console.info(
+            "Activity socket open",
+            CONFIG.activityWsUrl
+        );
+
+        syncActivitySubscriptions();
+        updateStatus();
+    };
+
+    socket.onmessage = event => {
+        if (activitySocket !== socket) {
+            return;
+        }
+
+        const message =
+            parseWebSocketJson(
+                "Activity socket",
+                event.data
+            );
+
+        if (message === null) {
+            return;
+        }
+
+        if (!receivedFirstMessage) {
+            receivedFirstMessage = true;
+
+            console.info(
+                "Activity first message",
+                message.stream || message
+            );
+        }
+
+        const data = message.data || message;
+
+        if (data.e !== "aggTrade") {
+            return;
+        }
+
+        const item = symbols.get(data.s);
+
+        if (
+            !item ||
+            !candidateSymbols.has(data.s)
+        ) {
+            return;
+        }
+
+        const timestamp = Number(data.T);
+        const price = Number(data.p);
+        const quantity = Number(data.q);
+
+        if (
+            !Number.isFinite(timestamp) ||
+            !Number.isFinite(price) ||
+            !Number.isFinite(quantity)
+        ) {
+            return;
+        }
+
+        const receivedAt = Date.now();
+
+        addActivityEvent(item, {
+            timestamp,
+            receivedAt,
+            price,
+            quantity,
+            quoteVolume: price * quantity
+        });
+
+        diagnostics.aggTradeMessages++;
+    };
+
+    socket.onerror = error => {
+        if (activitySocket !== socket) {
+            return;
+        }
+
+        document.getElementById("status").textContent =
+            "Activity WebSocket error";
+
+        console.error(
+            "Activity socket error",
+            error
+        );
+    };
+
+    socket.onclose = event => {
+        if (activitySocket !== socket) {
+            return;
+        }
+
+        console.info(
+            "Activity socket close",
+            event.code,
+            event.reason || "(no reason)"
+        );
+
+        activitySocket = null;
+        activitySubscriptions.clear();
+
+        for (const symbol of candidateSymbols) {
+            const item = symbols.get(symbol);
+
+            if (item) {
+                resetActivity(item);
+            }
+        }
+
+        updateStatus();
+        scheduleActivityReconnect();
+    };
+}
+
+
+//
+// ============================================================
+// ACTIVE COINS
+// ============================================================
+//
+
+function updateActiveCoins(now) {
+    let countChanged = false;
+
+    for (const symbol of candidateSymbols) {
+        const item = symbols.get(symbol);
+
+        if (
+            !item ||
+            (
+                item.marketState !== "ACTIVE" &&
+                item.marketState !== "EXPANDING"
+            )
+        ) {
+            continue;
+        }
+
+        const activeCoin = activeCoins.get(symbol);
+
+        if (activeCoin) {
+            activeCoin.lastActiveAt = now;
+        } else {
+            activeCoins.set(symbol, {
+                firstActiveAt: now,
+                lastActiveAt: now
+            });
+
+            countChanged = true;
+        }
+    }
+
+    if (countChanged) {
+        updateStatus();
+    }
+}
+
+
+function cleanupActiveCoins(now) {
+    let countChanged = false;
+
+    for (const [symbol, activeCoin] of activeCoins) {
+        if (
+            !symbols.has(symbol) ||
+            now - activeCoin.lastActiveAt >
+                CONFIG.activeTable.ttlMs
+        ) {
+            activeCoins.delete(symbol);
+            countChanged = true;
+        }
+    }
+
+    if (countChanged) {
+        updateStatus();
+    }
+}
+
+
+//
+// ============================================================
+// UI
+// ============================================================
+//
+
+function updateMarketMetrics(now) {
+    for (const symbol of candidateSymbols) {
+        const item = symbols.get(symbol);
+
+        if (!item) {
+            continue;
+        }
+
+        item.metrics =
+            calculateMetrics(item, now);
+
+        updateStateScore(
+            item,
+            item.metrics.score
+        );
+
+        updateMarketState(
+            item,
+            item.metrics,
+            now
+        );
+    }
+}
+
+
+function renderMarketRow(
+    item,
+    metrics,
+    index,
+    extraCells = ""
+) {
+    const state =
+        metrics.confidence === "WARMUP"
+            ? "COLLECTING"
+            : item.marketState;
+
+    const priceClass =
+        Number.isFinite(metrics.move10)
+            ? metrics.move10 >= 0
+                ? "positive"
+                : "negative"
+            : "";
+
+    const scoreTitle =
+        metrics.scoreComponents
+            ? `Movement ${metrics.scoreComponents.movement.toFixed(2)}` +
+                ` | Acceleration ${formatOptional(metrics.scoreComponents.acceleration, value => value.toFixed(2))}` +
+                ` | Volume ${metrics.scoreComponents.volume.toFixed(2)}` +
+                ` | AggTrades ${metrics.scoreComponents.aggTrades.toFixed(2)}`
+            : "Collecting enough data for a preliminary score";
+
+    return `
+        <tr>
+            <td>${index + 1}</td>
+            <td>${item.symbol}</td>
+
+            <td title="${scoreTitle}">
+                ${formatOptional(
+                    metrics.score,
+                    value => value.toFixed(2)
+                )}
+            </td>
+
+            <td>
+                ${formatOptional(
+                    item.stateScore,
+                    value => value.toFixed(2)
+                )}
+            </td>
+
+            <td>${formatPrice(item.lastPrice)}</td>
+
+            <td class="${priceClass}">
+                ${formatOptional(
+                    metrics.move10,
+                    formatPercent
+                )}
+            </td>
+
+            <td>
+                ${formatOptional(
+                    metrics.move30,
+                    formatPercent
+                )}
+            </td>
+
+            <td>
+                ${formatOptional(
+                    metrics.move60,
+                    formatPercent
+                )}
+            </td>
+
+            <td>${metrics.volumeRatio.toFixed(2)}×</td>
+            <td>${metrics.aggTradeRatio.toFixed(2)}×</td>
+
+            <td>
+                ${formatOptional(
+                    metrics.acceleration,
+                    value => value.toFixed(5)
+                )}
+            </td>
+
+            <td class="${stateClass(state)}">${state}</td>
+            <td>${metrics.confidence}</td>
+            ${extraCells}
+        </tr>
+    `;
+}
+
+
+function renderActiveCoins(now) {
+    const rows = [];
+    let removedMissingSymbol = false;
+
+    for (const [symbol, activeCoin] of activeCoins) {
+        const item = symbols.get(symbol);
+
+        if (!item) {
+            activeCoins.delete(symbol);
+            removedMissingSymbol = true;
+            continue;
+        }
+
+        if (!item.metrics) {
+            continue;
+        }
+
+        rows.push({
+            item,
+            metrics: item.metrics,
+            activeCoin
+        });
+    }
+
+    rows.sort((a, b) => {
+        const recencyDifference =
+            b.activeCoin.lastActiveAt -
+            a.activeCoin.lastActiveAt;
+
+        if (Math.abs(recencyDifference) > 1_000) {
+            return recencyDifference;
+        }
+
+        return (
+            (b.metrics.score ?? -Infinity) -
+            (a.metrics.score ?? -Infinity)
+        );
+    });
+
+    document.getElementById("activeHeading").textContent =
+        `Active Coins (${activeCoins.size})`;
+
+    document.getElementById("activeRows").innerHTML =
+        rows.length > 0
+            ? rows.map(
+                ({ item, metrics, activeCoin }, index) =>
+                    renderMarketRow(
+                        item,
+                        metrics,
+                        index,
+                        `
+                            <td>
+                                ${formatAge(
+                                    now - activeCoin.firstActiveAt
+                                )}
+                            </td>
+                            <td>
+                                ${formatLastActive(
+                                    now - activeCoin.lastActiveAt
+                                )}
+                            </td>
+                        `
+                    )
+            ).join("")
+            : `
+                <tr>
+                    <td class="empty" colspan="15">
+                        No recently active coins
+                    </td>
+                </tr>
+            `;
+
+    if (removedMissingSymbol) {
+        updateStatus();
+    }
+}
+
+
+function renderCandidates() {
+
+    const ranked = [];
+
+
+    for (const symbol of candidateSymbols) {
+        const item = symbols.get(symbol);
+
+        if (!item) {
+            continue;
+        }
+
+        const metrics = item.metrics;
+
+        if (!metrics) {
+            continue;
+        }
+
+        ranked.push({
+            item,
+            metrics
+        });
+    }
+
+
+    ranked.sort(
+        (a, b) =>
+            (b.metrics.score ?? -Infinity) -
+            (a.metrics.score ?? -Infinity)
+    );
+
+
+    const rows =
+        ranked.slice(
+            0,
+            CONFIG.maxRows
+        );
+
+    document.getElementById("candidatesSummary").textContent =
+        `All Candidates (${candidateSymbols.size})`;
+
+    document.getElementById("candidateRows").innerHTML =
+        rows.map(
+            ({ item, metrics }, index) =>
+                renderMarketRow(
+                    item,
+                    metrics,
+                    index
+                )
+        ).join("");
+}
+
+
+function render(now) {
+    renderActiveCoins(now);
+    renderCandidates();
+}
+
+
+//
+// ============================================================
+// START
+// ============================================================
+//
+
+function logDiagnostics() {
+    const now = Date.now();
+
+    const rounded = (value, digits = 2) =>
+        Number.isFinite(value)
+            ? Number(value.toFixed(digits))
+            : null;
+
+    const scored =
+        [...candidateSymbols]
+            .map(symbol => symbols.get(symbol))
+            .filter(item =>
+                item &&
+                Number.isFinite(item.metrics?.score)
+            )
+            .sort(
+                (a, b) =>
+                    b.metrics.score -
+                    a.metrics.score
+            );
+
+    console.info(
+        "Pipeline diagnostics",
+        {
+            discoveryMessages:
+                diagnostics.discoveryMessages,
+            candidates:
+                candidateSymbols.size,
+            subscriptions:
+                activitySubscriptions.size,
+            aggTradeMessages:
+                diagnostics.aggTradeMessages,
+            scorableSymbols:
+                scored.length
+        }
+    );
+
+    console.table(
+        scored.slice(0, 5).map(item => ({
+            symbol: item.symbol,
+            rawScore:
+                rounded(item.metrics.score),
+            stateScore:
+                rounded(item.stateScore),
+            movementScore:
+                rounded(
+                    item.metrics.scoreComponents.movement
+                ),
+            accelerationScore:
+                rounded(
+                    item.metrics.scoreComponents.acceleration
+                ),
+            volumeScore:
+                rounded(
+                    item.metrics.scoreComponents.volume
+                ),
+            aggTradeScore:
+                rounded(
+                    item.metrics.scoreComponents.aggTrades
+                ),
+            volumeRatio:
+                rounded(item.metrics.volumeRatio),
+            aggTradeRatio:
+                rounded(item.metrics.aggTradeRatio),
+            confidence:
+                item.metrics.confidence,
+            currentState:
+                item.marketState,
+            pendingState:
+                item.pendingState,
+            pendingForMs:
+                item.pendingStateSince === null
+                    ? null
+                    : now - item.pendingStateSince,
+            stateAgeMs:
+                item.stateChangedAt === null
+                    ? null
+                    : now - item.stateChangedAt
+        }))
+    );
+}
+
+
+function refreshMarket() {
+    const now = Date.now();
+
+    updateMarketMetrics(now);
+    updateActiveCoins(now);
+    render(now);
+}
+
+
+connectDiscovery();
+connectActivity();
+
+setInterval(
+    refreshMarket,
+    CONFIG.renderIntervalMs
+);
+
+setInterval(
+    logDiagnostics,
+    CONFIG.diagnosticIntervalMs
+);
+
+setInterval(
+    () => cleanupActiveCoins(Date.now()),
+    CONFIG.activeTable.cleanupIntervalMs
+);
+
+</script>
+
+</body>
+</html>
