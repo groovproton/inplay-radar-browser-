@@ -1,106 +1,71 @@
-# BWS — Binance Action Indicator
+# InPlay Radar — Binance Action Indicator
 
-Browser-only, real-time scanner for **active Binance Spot USDT pairs**. BWS ranks symbols by changes in market activity so that coins waking up *now* stand out from coins that merely have a large 24-hour price change.
+Browser-only scanner of **real-time activity in Binance Spot USDT markets**. It identifies changes in trading intensity; it is **not a directional trading signal**.
 
-## Features (V1)
+## Architecture
 
-- Live Binance market feed over WebSocket (`!ticker@arr`).
-- Filters for USDT trading pairs.
-- Maintains approximately 120 seconds of recent ticker snapshots.
-- Compares changes across 10-, 30-, and 60-second windows.
-- Computes an **Action Score** to rank symbols by activity.
-- Classifies market activity as `QUIET`, `WAKING`, `ACTIVE`, or `EXPANDING`.
-- Displays up to 50 candidates, refreshing the table approximately every 500 ms.
-- Uses a minimum 24-hour quote-volume filter (initial V1 default: 500,000 USDT).
-- Reconnects if the WebSocket connection drops (initial V1 delay: 2 seconds).
+```text
+Binance !ticker_1d@arr
+        |
+   USDT discovery
+   (24h liquidity + 10s price movement)
+        |
+ Candidate ranking: enter Top 50 / exit below Top 70
+        |
+ Binance combined @aggTrade subscriptions
+        |
+ Quote turnover + aggregated-trade event intensity
+ 10s current window / up to 50s preceding baseline
+        |
+ Price change 10s / 30s / 60s + acceleration
+        |
+ Action Score -> smoothed state machine
+        |
+ Browser dashboard (active coins + candidate list)
+```
 
-> This is an **activity detector**, not a buy/sell signal. High activity does not necessarily imply sustained directional movement.
-
-## Requirements
-
-- A modern browser with WebSocket support.
-- Python 3 (only to serve static files locally).
-- `make` (optional convenience wrapper).
-- Internet connectivity to Binance's public market-data endpoint.
-
-No Node.js, `npm`, `package.json`, frontend framework, build step, API keys, or application backend is required.
+Runs entirely in a browser in one `index.html`; no Node.js, npm, package.json, framework, API keys, backend or bundler.
 
 ## Quick start
 
-From the project directory:
-
 ```sh
 make serve
+# visit http://127.0.0.1:8000/
 ```
 
-Open <http://localhost:8000/>.
+Or: `python3 -m http.server 8000 --bind 127.0.0.1`. Stop foreground serving with Ctrl+C. `make start`, `make stop`, `make status`, and `make restart` manage a background server; `PORT=8080 make serve` changes the port.
 
-The command runs in the foreground; press **Ctrl+C** to stop it.
+## Data and calculation
 
-Alternatively, run without Make:
+- **Discovery:** `wss://stream.binance.com:9443/ws/!ticker_1d@arr` provides 24-hour rolling ticker information, not a 1-minute trade feed.
+- **Activity:** `wss://stream.binance.com:9443/stream` with dynamic `<symbol>@aggTrade` subscriptions provides aggregated executions for selected candidates.
+- **Price movement:** differences from ticker snapshots nearest 10, 30 and 60 seconds ago (within 2.5 seconds tolerance).
+- **Quote Vol Ratio:** quote turnover in the most recent 10 seconds divided by average 10-second quote turnover in the preceding available baseline (up to 50 seconds). The preceding baseline excludes the most recent 10 seconds.
+- **AggTrade Ratio:** same comparison using **aggregated trade events**, not the total number of individual executions.
+- **Acceleration:** absolute percentage change per second in the recent 10 seconds minus that over 30 seconds, using only the positive component in the score.
+- **Action Score:** weighted magnitude of price movement, positive acceleration and excess volume/event-rate ratios, each with a capped ratio contribution.
+- **Confidence:** WARMUP/LOW/MED/FULL based on elapsed observation and usable price snapshots. A symbol without a confirmed subscription or with stale discovery data is held in WARMUP.
 
-```sh
-python3 -m http.server 8000 --bind 127.0.0.1
-```
+## Market states
 
-Alternatively, stop without Make:
+`QUIET → WAKING → ACTIVE → EXPANDING` (or back down). States use an exponentially smoothed score, distinct enter/exit thresholds, confirmation time, confidence caps and minimum hold time. Active coins remain visible for up to 5 minutes after last being active. Recently active candidates are retained for an additional 2 minutes so brief pauses do not immediately terminate detailed monitoring.
 
-```sh
-kill $(lsof -tiTCP:8000 -sTCP:LISTEN)
-```
+## WebSocket reliability
 
+- Discovery and activity sockets reconnect with exponential backoff plus jitter.
+- Subscription state is updated **after Binance acknowledges** SUBSCRIBE/UNSUBSCRIBE, not merely on send. Errors are logged and retried; unanswered commands trigger reconnect after 10 seconds.
+- Activity history is reset on a new subscription, avoiding reuse of samples across gaps; reconnect resets activity readiness.
+- Discovery has a 15-second stale timeout, surfaced in the status line. A missing `aggTrade` on a single quiet symbol is **not** by itself proof of a broken connection.
+- The browser's displayed confirmation status and score quality do not guarantee that every upstream market event was delivered. There is no historical backfill or complete trade-sequence audit.
 
+## Limitations
 
-If you previously configured the local hostname `bws.local` to resolve to `127.0.0.1`, you can also open <http://bws.local:8000/>.
+Candidate discovery uses rolling 24-hour turnover and ticker changes. A very quiet/low-liquidity symbol may not be shortlisted even if it begins an interesting move. `@aggTrade` combines eligible individual trades into aggregate events. Neither AggTrade Ratio nor the score equals true trade count, order-flow delta, CVD, or probability of profitable movement.
 
-## Makefile commands
-
-| Command | Action |
-| --- | --- |
-| `make help` | Display available commands. |
-| `make serve` | Run the development HTTP server in the foreground. |
-| `make start` | Start the server in the background. |
-| `make status` | Show whether the managed background server is running. |
-| `make stop` | Stop the server started with `make start`. |
-| `make restart` | Stop and restart the managed background server. |
-
-Override the port if necessary:
-
-```sh
-make serve PORT=8080
-```
-
-For background operation, use the same `PORT` value for `start`, `status`, and `stop`.
-
-## How it works
+## Project files
 
 ```text
-Binance Spot WebSocket (!ticker@arr)
-               |
-          USDT filter
-               |
-     Recent ticker history
-               |
-   10s / 30s / 60s changes
-               |
-   Action Score + state
-               |
-     Ranked live dashboard
+index.html   Browser-only scanner (HTML + CSS + JavaScript)
+README.md    Project explanation
+Makefile     Local static HTTP server
 ```
-
-The V1 market stream provides **24-hour rolling ticker statistics**. BWS measures *changes in those statistics over short intervals* to estimate recent activity; it is not directly consuming individual trades. As a result, these estimates are not identical to exact trade counts, exact 1-minute quote volume, order-flow delta, or CVD derived from `trade`/`aggTrade` events.
-
-## Project structure
-
-```text
-bws/
-├── index.html      # Browser application (V1)
-├── README.md       # Project documentation
-└── Makefile        # Local development commands
-```
-
-## Notes
-
-- Data is public; no trading or order execution takes place.
-- The browser connects directly to Binance. Availability depends on network access and the Binance stream service.
-- V1 prioritizes finding sudden activity; whether an active coin is suitable for trading requires separate price/structure analysis.
