@@ -21,7 +21,7 @@ Binance !ticker_1d@arr
         |
  Action Score -> smoothed state machine
         |
- Browser dashboard (active coins + candidate list)
+ Browser dashboard (Active Now + Recent Activity + candidates)
 ```
 
 Runs entirely in a browser in one `index.html`; no Node.js, npm, package.json, framework, API keys, backend or bundler.
@@ -44,18 +44,18 @@ Or: `python3 -m http.server 8000 --bind 127.0.0.1`. Stop foreground serving with
 - **AggTrade Ratio:** same comparison using **aggregated trade events**, not the total number of individual executions.
 - **Acceleration:** absolute percentage change per second in the recent 10 seconds minus that over 30 seconds, using only the positive component in the score.
 - **Action Score:** weighted magnitude of price movement, positive acceleration and excess volume/event-rate ratios, each with a capped ratio contribution.
-- **Confidence:** WARMUP/LOW/MED/FULL based on elapsed observation and usable price snapshots. A symbol without a confirmed subscription or with stale discovery data is held in WARMUP.
+- **Confidence:** WARMUP/LOW/MED/FULL describes observation age and availability of 10/30/60s price windows; a candidate's last known ticker price is sampled every 500 ms while Discovery remains fresh to prevent gaps from normal quiet intervals. **Feed status** (SUBSCRIBING, STALE, COLLECTING, READY) is separate: an unconfirmed subscription or stale Discovery never counts as actively ready.
 
 ## Market states
 
-`QUIET → WAKING → ACTIVE → EXPANDING` (or back down). States use an exponentially smoothed score, distinct enter/exit thresholds, confirmation time, confidence caps and minimum hold time. Active coins remain visible for up to 5 minutes after last being active. Recently active candidates are retained for an additional 2 minutes so brief pauses do not immediately terminate detailed monitoring.
+`QUIET → WAKING → ACTIVE → EXPANDING` (or back down). States use an exponentially smoothed score, distinct enter/exit thresholds, confirmation time, confidence caps and minimum hold time. **Active Now** contains only currently READY symbols whose state is ACTIVE or EXPANDING. A separate expandable **Recent Activity** section retains previously active symbols for up to 5 minutes since last active, without counting them as active now. Recently active candidates can be retained for an additional 2 minutes so brief pauses do not immediately terminate detailed monitoring.
 
 ## WebSocket reliability
 
 - Discovery and activity sockets reconnect with exponential backoff plus jitter.
 - Subscription state is updated **after Binance acknowledges** SUBSCRIBE/UNSUBSCRIBE, not merely on send. Errors are logged and retried; unanswered commands trigger reconnect after 10 seconds.
-- Activity history is reset on a new subscription, avoiding reuse of samples across gaps; reconnect resets activity readiness.
-- Discovery has a 15-second stale timeout, surfaced in the status line. A missing `aggTrade` on a single quiet symbol is **not** by itself proof of a broken connection.
+- Activity history resets only after a subscription has been confirmed and an earlier observation interval was interrupted, rather than at the instant a subscription request is sent. Reconnect resets activity readiness.
+- Discovery has a 15-second stale timeout, surfaced in the status line. Transition logs for feed readiness and market states appear in the browser console. A missing `aggTrade` on a single quiet symbol is **not** by itself proof of a broken connection.
 - The browser's displayed confirmation status and score quality do not guarantee that every upstream market event was delivered. There is no historical backfill or complete trade-sequence audit.
 
 ## Limitations
