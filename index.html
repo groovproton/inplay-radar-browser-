@@ -1179,6 +1179,13 @@ function updateMarketState(item, metrics, now) {
         return;
     }
 
+    console.info("Market state transition", {
+        symbol: item.symbol,
+        from: item.marketState,
+        to: desiredState,
+        score: item.stateScore,
+        confidence: metrics.confidence
+    });
     item.marketState = desiredState;
     item.stateChangedAt = now;
     item.pendingState = null;
@@ -1945,7 +1952,13 @@ function updateMarketMetrics(now) {
             activitySubscriptions.has(symbol);
 
         if (!discoveryFresh || !subscribed) {
-            item.feedStatus = !discoveryFresh ? "STALE" : "SUBSCRIBING";
+            const nextStatus = !discoveryFresh ? "STALE" : "SUBSCRIBING";
+            if (item.feedStatus !== nextStatus) {
+                console.info("Market feed status", {
+                    symbol, from: item.feedStatus, to: nextStatus
+                });
+            }
+            item.feedStatus = nextStatus;
             item.metrics = null;
             // Preserve smoothed state while transiently unavailable, but
             // never advertise it as an active, tradeable signal.
@@ -1960,8 +1973,14 @@ function updateMarketMetrics(now) {
         }
 
         item.metrics = calculateMetrics(item, now);
-        item.feedStatus = item.metrics.confidence === "WARMUP"
+        const nextStatus = item.metrics.confidence === "WARMUP"
             ? "COLLECTING" : "READY";
+        if (item.feedStatus !== nextStatus) {
+            console.info("Market feed status", {
+                symbol, from: item.feedStatus, to: nextStatus
+            });
+        }
+        item.feedStatus = nextStatus;
 
         updateStateScore(item, item.metrics.score);
         updateMarketState(item, item.metrics, now);
