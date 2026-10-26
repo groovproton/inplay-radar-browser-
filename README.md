@@ -46,6 +46,10 @@ Or: `python3 -m http.server 8000 --bind 127.0.0.1`. Stop foreground serving with
 - **Action Score:** weighted magnitude of price movement, positive acceleration and excess volume/event-rate ratios, each with a capped ratio contribution.
 - **Confidence:** WARMUP/LOW/MED/FULL describes observation age and availability of 10/30/60s price windows; a candidate's last known ticker price is sampled every 500 ms while Discovery remains fresh to prevent gaps from normal quiet intervals. **Feed status** (SUBSCRIBING, STALE, COLLECTING, READY) is separate: an unconfirmed subscription or stale Discovery never counts as actively ready.
 
+## Sorting
+
+The three browser tables share a sort selector. The default is **Symbol A–Z** to keep rows stable as scores change. **Symbol Z–A** and **Score high to low** are also available. Row order is recomputed on updates, but alphabetical mode does not reshuffle existing symbols when their scores move; only entries/exits change the list.
+
 ## Market states
 
 `QUIET → WAKING → ACTIVE → EXPANDING` (or back down). States use an exponentially smoothed score, distinct enter/exit thresholds, confirmation time, confidence caps and minimum hold time. **Active Now** contains only currently READY symbols whose state is ACTIVE or EXPANDING. A separate expandable **Recent Activity** section retains previously active symbols for up to 5 minutes since last active, without counting them as active now. Recently active candidates can be retained for an additional 2 minutes so brief pauses do not immediately terminate detailed monitoring.
