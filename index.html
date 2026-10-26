@@ -764,14 +764,16 @@ function calculateMetrics(item, now) {
     const volume10 =
         activity10.quoteVolume;
 
+    // activityTotalsSince() includes the current 10s window.
+    // Subtract it to isolate the preceding baseline interval.
     const volumeWindow =
-        activityWindow.quoteVolume;
+        Math.max(0, activityWindow.quoteVolume - volume10);
 
     const aggTrades10 =
         activity10.aggTrades;
 
     const aggTradesWindow =
-        activityWindow.aggTrades;
+        Math.max(0, activityWindow.aggTrades - aggTrades10);
 
     //
     // Price velocity:
@@ -1423,7 +1425,8 @@ function sendSubscriptionChange(method, symbolsToChange) {
     const id = subscriptionRequestId++;
     const request = {
         method,
-        symbols: [...symbolsToChange]
+        symbols: [...symbolsToChange],
+        sentAt: Date.now()
     };
 
     pendingSubscriptionRequests.set(id, request);
@@ -2270,6 +2273,17 @@ function logDiagnostics() {
 
 function refreshMarket() {
     const now = Date.now();
+
+    // An unanswered control request must not block subscriptions forever.
+    if (
+        activitySocket?.readyState === WebSocket.OPEN &&
+        [...pendingSubscriptionRequests.values()].some(
+            request => now - request.sentAt > 10_000
+        )
+    ) {
+        console.warn("Subscription acknowledgment timeout; reconnecting");
+        activitySocket.close();
+    }
 
     updateStatus();
     updateMarketMetrics(now);
