@@ -27,6 +27,25 @@
             margin-top: 0;
         }
 
+        #marketTabs {
+            display: flex;
+            gap: 8px;
+            margin: 12px 0;
+        }
+        #marketTabs button {
+            padding: 7px 14px;
+            background: #181a20;
+            border: 1px solid #474d57;
+            border-radius: 4px;
+            color: #b7bdc6;
+            cursor: pointer;
+            font: inherit;
+        }
+        #marketTabs button[aria-selected="true"] {
+            color: #f0b90b;
+            border-color: #f0b90b;
+        }
+
         #status {
             margin-bottom: 16px;
             color: #848e9c;
@@ -133,6 +152,10 @@
 <body>
 
 <h1>Binance Action Indicator</h1>
+<div id="marketTabs" role="tablist" aria-label="Market">
+    <button type="button" role="tab" id="tabFutures" aria-selected="true" aria-controls="activeTable" data-market="futures">USDⓈ-M Futures</button>
+    <button type="button" role="tab" id="tabSpot" aria-selected="false" aria-controls="activeTable" data-market="spot">Spot</button>
+</div>
 
 <div id="status">
     Connecting...
@@ -231,6 +254,24 @@
 <script>
 "use strict";
 
+// Both scanners run continuously. Tabs only select the rendered view.
+let activeMarket = "futures";
+// Sorting is shared between views, while data is scoped to this scanner.
+
+const MARKET_ENDPOINTS = {
+    futures: {
+        discovery: "wss://fstream.binance.com/market/ws/!ticker@arr",
+        activity: "wss://fstream.binance.com/market/stream"
+    },
+    spot: {
+        discovery: "wss://stream.binance.com:9443/ws/!ticker_1d@arr",
+        activity: "wss://stream.binance.com:9443/stream"
+    }
+};
+
+function createScanner(market) {
+const endpoints = MARKET_ENDPOINTS[market];
+
 //
 // ============================================================
 // CONFIG
@@ -239,10 +280,10 @@
 
 const CONFIG = {
     discoveryWsUrl:
-        "wss://stream.binance.com:9443/ws/!ticker_1d@arr",
+        endpoints.discovery,
 
     activityWsUrl:
-        "wss://stream.binance.com:9443/stream",
+        endpoints.activity,
 
     quoteAsset:
         "USDT",
@@ -1244,6 +1285,9 @@ function reconnectDelay(retryCount) {
 
 
 function updateStatus() {
+    if (market !== activeMarket) {
+        return;
+    }
     const discoveryConnected =
         discoverySocket?.readyState === WebSocket.OPEN;
 
@@ -1582,6 +1626,7 @@ function connectDiscovery() {
         discoveryRetryCount = 0;
 
         console.info(
+            market,
             "Discovery socket open",
             CONFIG.discoveryWsUrl
         );
@@ -1629,7 +1674,8 @@ function connectDiscovery() {
 
             if (
                 !symbol ||
-                !symbol.endsWith(CONFIG.quoteAsset)
+                !symbol.endsWith(CONFIG.quoteAsset) ||
+                (market === "futures" && ticker.st !== undefined && Number(ticker.st) !== 1)
             ) {
                 continue;
             }
@@ -1732,6 +1778,7 @@ function connectActivity() {
         lastActivityMessageAt = null;
 
         console.info(
+            market,
             "Activity socket open",
             CONFIG.activityWsUrl
         );
@@ -2191,6 +2238,9 @@ function renderCandidates() {
 
 
 function render(now) {
+    if (market !== activeMarket) {
+        return;
+    }
     renderActiveCoins(now);
     renderCandidates();
 }
@@ -2307,29 +2357,72 @@ function refreshMarket() {
 }
 
 
-document.getElementById("sortMode").addEventListener("change", event => {
-    sortMode = event.target.value;
-    render(Date.now());
+function start() {
+    connectDiscovery();
+    connectActivity();
+
+    setInterval(refreshMarket, CONFIG.renderIntervalMs);
+    setInterval(() => {
+        if (market === activeMarket) {
+            logDiagnostics();
+        }
+    }, CONFIG.diagnosticIntervalMs);
+    setInterval(() => cleanupActiveCoins(Date.now()),
+        CONFIG.activeTable.cleanupIntervalMs);
+}
+
+return {
+    start,
+    show() {
+        updateStatus();
+        render(Date.now());
+    },
+    // Diagnostic and test hooks; each scanner owns a separate state map.
+    stats() {
+        return {
+            market,
+            candidates: candidateSymbols.size,
+            subscriptions: activitySubscriptions.size,
+            symbols: symbols.size
+        };
+    }
+};
+}
+
+const scanners = {
+    futures: createScanner("futures"),
+    spot: createScanner("spot")
+};
+
+function showMarket(market) {
+    if (!scanners[market]) {
+        return;
+    }
+    activeMarket = market;
+    for (const tab of document.querySelectorAll("#marketTabs [data-market]")) {
+        const selected = tab.dataset.market === market;
+        tab.setAttribute("aria-selected", String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+    }
+    scanners[market].show();
+}
+
+document.getElementById("marketTabs").addEventListener("click", event => {
+    const tab = event.target.closest("[data-market]");
+    if (tab) {
+        showMarket(tab.dataset.market);
+    }
 });
 
-connectDiscovery();
-connectActivity();
+document.getElementById("sortMode").addEventListener("change", event => {
+    sortMode = event.target.value;
+    scanners[activeMarket].show();
+});
 
-setInterval(
-    refreshMarket,
-    CONFIG.renderIntervalMs
-);
-
-setInterval(
-    logDiagnostics,
-    CONFIG.diagnosticIntervalMs
-);
-
-setInterval(
-    () => cleanupActiveCoins(Date.now()),
-    CONFIG.activeTable.cleanupIntervalMs
-);
-
+// Start both live pipelines; do not tear down the hidden market.
+scanners.futures.start();
+scanners.spot.start();
+showMarket("futures");
 </script>
 
 </body>
