@@ -256,7 +256,7 @@
 
 // Both scanners run continuously. Tabs only select the rendered view.
 let activeMarket = "futures";
-// Sorting is shared between views, while data is scoped to this scanner.
+let sortMode = "symbol-asc";
 
 const MARKET_ENDPOINTS = {
     futures: {
@@ -388,7 +388,6 @@ const CONFIG = {
 
 const symbols = new Map();
 const activeCoins = new Map();
-let sortMode = "symbol-asc";
 
 let candidateSymbols = new Set();
 let activitySubscriptions = new Set();
@@ -1503,7 +1502,10 @@ function sendSubscriptionChange(method, symbolsToChange) {
         return;
     }
 
-    const id = subscriptionRequestId++;
+    // Futures control API uses string request IDs; Spot accepts numeric IDs.
+    const id = market === "futures"
+        ? `futures-${subscriptionRequestId++}`
+        : subscriptionRequestId++;
     const request = {
         method,
         symbols: [...symbolsToChange],
@@ -1813,7 +1815,8 @@ function connectActivity() {
 
         // Binance control responses have { result, id } or
         // { code, msg, id }; they are not market-data events.
-        if (Number.isInteger(message.id)) {
+        if (typeof message.id === "string" ||
+            Number.isInteger(message.id)) {
             const request =
                 pendingSubscriptionRequests.get(message.id);
 
