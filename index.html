@@ -138,7 +138,7 @@
     Connecting...
 </div>
 
-<h2 id="activeHeading">Active Coins (0)</h2>
+<h2 id="activeHeading">Active Now (0)</h2>
 
 <div class="table-wrap">
 <table id="activeTable">
@@ -170,6 +170,24 @@
     <tbody id="activeRows"></tbody>
 </table>
 </div>
+
+<details>
+    <summary id="historySummary">Recent Activity (0)</summary>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th><th>Symbol</th><th>Score</th><th>State Score</th>
+                    <th>Price</th><th>Δ 10s</th><th>Δ 30s</th><th>Δ 60s</th>
+                    <th>Quote Vol Ratio</th><th>AggTrade Ratio</th>
+                    <th>Acceleration</th><th>State</th><th>Confidence</th>
+                    <th>Active Since</th><th>Last Active</th>
+                </tr>
+            </thead>
+            <tbody id="historyRows"></tbody>
+        </table>
+    </div>
+</details>
 
 <details>
     <summary id="candidatesSummary">All Candidates (0)</summary>
@@ -241,7 +259,7 @@ const CONFIG = {
         120_000,
 
     snapshotToleranceMs:
-        2_500,
+        2_500, // only for historical discovery samples (periodic candidate samples fill gaps)
 
     minimumQuoteVolume1d:
         500_000,
@@ -481,7 +499,8 @@ function createSymbol(symbol) {
         pendingState: null,
         pendingStateSince: null,
 
-        metrics: null
+        metrics: null,
+        feedStatus: "COLLECTING"
     };
 }
 
@@ -505,28 +524,29 @@ function addSnapshot(item, now) {
 
 
 function snapshotAt(item, ageMs, now) {
-    const target =
-        now - ageMs;
+    const target = now - ageMs;
 
-    let best = null;
-    let bestError = Infinity;
-
-    for (let i = 0; i < item.history.length; i++) {
-        const snapshot =
-            item.history[i];
-
-        const error =
-            Math.abs(snapshot.time - target);
-
-        if (error < bestError) {
-            best = snapshot;
-            bestError = error;
+    // Binary search for the closest snapshot at or before target.
+    // Candidate prices are sampled on every UI refresh while Discovery
+    // is fresh, so an unchanged ticker does not imply missing data.
+    let low = 0;
+    let high = item.history.length;
+    while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (item.history[middle].time <= target) {
+            low = middle + 1;
+        } else {
+            high = middle;
         }
     }
+    const before = item.history[low - 1] ?? null;
+    const after = item.history[low] ?? null;
+    const best = !before ? after :
+        !after ? before :
+        target - before.time <= after.time - target ? before : after;
 
-    return bestError <= CONFIG.snapshotToleranceMs
-        ? best
-        : null;
+    return best && Math.abs(best.time - target) <=
+        CONFIG.snapshotToleranceMs ? best : null;
 }
 
 
@@ -545,6 +565,8 @@ function resetActivity(item, now = null) {
     item.stateChangedAt = now;
     item.pendingState = null;
     item.pendingStateSince = null;
+    item.metrics = null;
+    item.feedStatus = "COLLECTING";
 }
 
 
@@ -1223,7 +1245,8 @@ function updateStatus() {
         ` | Activity ${activityConnected ? "connected" : "disconnected"}` +
         ` | Candidates ${candidateSymbols.size}` +
         ` | Subscribed ${activitySubscriptions.size}` +
-        ` | Active ${activeCoins.size}`;
+        ` | Active Now ${[...candidateSymbols].filter(symbol =>
+            isActiveNow(symbols.get(symbol))).length}`;
 }
 
 
@@ -1500,14 +1523,8 @@ function syncActivitySubscriptions() {
         }
     }
 
-    for (const symbol of added) {
-        const item = symbols.get(symbol);
-        if (item) {
-            // A newly selected symbol begins with an empty, continuous
-            // observation window. Never reuse data across unsubscription.
-            resetActivity(item, now);
-        }
-    }
+    // Do not reset on a requested subscription: wait for Binance's ACK.
+    // This avoids clearing state repeatedly during candidate churn.
 
     if (added.length > 0 || removed.length > 0) {
         console.info(
@@ -1747,8 +1764,19 @@ function connectActivity() {
                     for (const symbol of request.symbols) {
                         if (request.method === "SUBSCRIBE") {
                             activitySubscriptions.add(symbol);
+                            const item = symbols.get(symbol);
+                            if (item && item.activityUnsubscribedAt !== null) {
+                                // Continuity was broken; start a new interval.
+                                resetActivity(item, Date.now());
+                            } else if (item && item.activityStartedAt === null) {
+                                resetActivity(item, Date.now());
+                            }
                         } else {
                             activitySubscriptions.delete(symbol);
+                            const item = symbols.get(symbol);
+                            if (item) {
+                                item.activityUnsubscribedAt = Date.now();
+                            }
                         }
                     }
                 } else {
@@ -1775,6 +1803,10 @@ function connectActivity() {
             !item ||
             !candidateSymbols.has(data.s)
         ) {
+            return;
+        }
+
+        if (!activitySubscriptions.has(data.s)) {
             return;
         }
 
@@ -1854,58 +1886,38 @@ function connectActivity() {
 // ============================================================
 //
 
-function updateActiveCoins(now) {
-    let countChanged = false;
+function isActiveNow(item) {
+    return item &&
+        item.feedStatus === "READY" &&
+        (item.marketState === "ACTIVE" ||
+         item.marketState === "EXPANDING");
+}
 
+function updateActiveCoins(now) {
     for (const symbol of candidateSymbols) {
         const item = symbols.get(symbol);
-
-        if (
-            !item ||
-            (
-                item.marketState !== "ACTIVE" &&
-                item.marketState !== "EXPANDING"
-            )
-        ) {
+        if (!isActiveNow(item)) {
             continue;
         }
 
-        const activeCoin = activeCoins.get(symbol);
-
-        if (activeCoin) {
-            activeCoin.lastActiveAt = now;
+        const record = activeCoins.get(symbol);
+        if (record) {
+            record.lastActiveAt = now;
         } else {
             activeCoins.set(symbol, {
                 firstActiveAt: now,
                 lastActiveAt: now
             });
-
-            countChanged = true;
         }
-    }
-
-    if (countChanged) {
-        updateStatus();
     }
 }
 
-
 function cleanupActiveCoins(now) {
-    let countChanged = false;
-
-    for (const [symbol, activeCoin] of activeCoins) {
-        if (
-            !symbols.has(symbol) ||
-            now - activeCoin.lastActiveAt >
-                CONFIG.activeTable.ttlMs
-        ) {
+    for (const [symbol, record] of activeCoins) {
+        if (!symbols.has(symbol) ||
+            now - record.lastActiveAt > CONFIG.activeTable.ttlMs) {
             activeCoins.delete(symbol);
-            countChanged = true;
         }
-    }
-
-    if (countChanged) {
-        updateStatus();
     }
 }
 
@@ -1917,44 +1929,42 @@ function cleanupActiveCoins(now) {
 //
 
 function updateMarketMetrics(now) {
+    const discoveryFresh =
+        discoverySocket?.readyState === WebSocket.OPEN &&
+        lastDiscoveryMessageAt !== null &&
+        now - lastDiscoveryMessageAt <= CONFIG.discoveryStaleMs;
+
     for (const symbol of candidateSymbols) {
         const item = symbols.get(symbol);
-
         if (!item) {
             continue;
         }
 
-        item.metrics =
-            calculateMetrics(item, now);
-
-        // Keep discovery and subscription health separate from a market
-        // with legitimately zero aggTrades during a quiet interval.
-        const discoveryFresh =
-            lastDiscoveryMessageAt !== null &&
-            now - lastDiscoveryMessageAt <= CONFIG.discoveryStaleMs;
         const subscribed =
+            activitySocket?.readyState === WebSocket.OPEN &&
             activitySubscriptions.has(symbol);
 
         if (!discoveryFresh || !subscribed) {
-            item.metrics.confidence = "WARMUP";
-            item.metrics.score = null;
-            item.metrics.scoreComponents = null;
-            item.stateScore = null;
-            item.marketState = "QUIET";
-            item.pendingState = null;
-            item.pendingStateSince = null;
+            item.feedStatus = !discoveryFresh ? "STALE" : "SUBSCRIBING";
+            item.metrics = null;
+            // Preserve smoothed state while transiently unavailable, but
+            // never advertise it as an active, tradeable signal.
+            continue;
         }
 
-        updateStateScore(
-            item,
-            item.metrics.score
-        );
+        // Advance a flat-price snapshot as long as Discovery is healthy.
+        // This guarantees regular 10/30/60s reference points even when
+        // Binance only transmits ticker changes.
+        if (item.lastPrice > 0) {
+            addSnapshot(item, now);
+        }
 
-        updateMarketState(
-            item,
-            item.metrics,
-            now
-        );
+        item.metrics = calculateMetrics(item, now);
+        item.feedStatus = item.metrics.confidence === "WARMUP"
+            ? "COLLECTING" : "READY";
+
+        updateStateScore(item, item.metrics.score);
+        updateMarketState(item, item.metrics, now);
     }
 }
 
@@ -1965,10 +1975,8 @@ function renderMarketRow(
     index,
     extraCells = ""
 ) {
-    const state =
-        metrics.confidence === "WARMUP"
-            ? "COLLECTING"
-            : item.marketState;
+    const state = item.feedStatus === "READY"
+        ? item.marketState : item.feedStatus;
 
     const priceClass =
         Number.isFinite(metrics.move10)
@@ -2046,80 +2054,55 @@ function renderMarketRow(
 
 
 function renderActiveCoins(now) {
-    const rows = [];
-    let removedMissingSymbol = false;
+    const current = [];
+    const historical = [];
 
-    for (const [symbol, activeCoin] of activeCoins) {
+    for (const [symbol, record] of activeCoins) {
         const item = symbols.get(symbol);
-
         if (!item) {
-            activeCoins.delete(symbol);
-            removedMissingSymbol = true;
             continue;
         }
-
-        if (!item.metrics) {
-            continue;
+        const row = { item, record, metrics: item.metrics };
+        if (isActiveNow(item) && record.lastActiveAt === now) {
+            current.push(row);
+        } else {
+            historical.push(row);
         }
-
-        rows.push({
-            item,
-            metrics: item.metrics,
-            activeCoin
-        });
     }
 
-    rows.sort((a, b) => {
-        const recencyDifference =
-            b.activeCoin.lastActiveAt -
-            a.activeCoin.lastActiveAt;
+    const byScore = (a, b) =>
+        (b.metrics?.score ?? -Infinity) -
+        (a.metrics?.score ?? -Infinity);
+    current.sort(byScore);
+    historical.sort((a, b) =>
+        b.record.lastActiveAt - a.record.lastActiveAt);
 
-        if (Math.abs(recencyDifference) > 1_000) {
-            return recencyDifference;
-        }
-
-        return (
-            (b.metrics.score ?? -Infinity) -
-            (a.metrics.score ?? -Infinity)
-        );
-    });
+    const rowsHtml = (rows, emptyMessage) =>
+        rows.length
+            ? rows.map(({ item, record, metrics }, index) => {
+                // Historical records may no longer have current metrics.
+                // Show their last observed values only when available.
+                const view = metrics ?? {
+                    score: null, move10: null, move30: null, move60: null,
+                    volumeRatio: 0, aggTradeRatio: 0,
+                    acceleration: null, confidence: "WARMUP",
+                    scoreComponents: null
+                };
+                return renderMarketRow(item, view, index, `
+                    <td>${formatAge(now - record.firstActiveAt)}</td>
+                    <td>${formatLastActive(now - record.lastActiveAt)}</td>
+                `);
+            }).join("")
+            : `<tr><td class="empty" colspan="15">${emptyMessage}</td></tr>`;
 
     document.getElementById("activeHeading").textContent =
-        `Active Coins (${activeCoins.size})`;
-
+        `Active Now (${current.length})`;
+    document.getElementById("historySummary").textContent =
+        `Recent Activity (${historical.length})`;
     document.getElementById("activeRows").innerHTML =
-        rows.length > 0
-            ? rows.map(
-                ({ item, metrics, activeCoin }, index) =>
-                    renderMarketRow(
-                        item,
-                        metrics,
-                        index,
-                        `
-                            <td>
-                                ${formatAge(
-                                    now - activeCoin.firstActiveAt
-                                )}
-                            </td>
-                            <td>
-                                ${formatLastActive(
-                                    now - activeCoin.lastActiveAt
-                                )}
-                            </td>
-                        `
-                    )
-            ).join("")
-            : `
-                <tr>
-                    <td class="empty" colspan="15">
-                        No recently active coins
-                    </td>
-                </tr>
-            `;
-
-    if (removedMissingSymbol) {
-        updateStatus();
-    }
+        rowsHtml(current, "No active coins right now");
+    document.getElementById("historyRows").innerHTML =
+        rowsHtml(historical, "No recent activity");
 }
 
 
@@ -2288,6 +2271,7 @@ function refreshMarket() {
     updateStatus();
     updateMarketMetrics(now);
     updateActiveCoins(now);
+    cleanupActiveCoins(now);
     render(now);
 }
 
