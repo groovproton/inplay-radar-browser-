@@ -139,6 +139,12 @@
 </div>
 
 <h2 id="activeHeading">Active Now (0)</h2>
+<label for="sortMode">Sort:</label>
+<select id="sortMode" aria-label="Sort coin tables">
+    <option value="symbol-asc" selected>Symbol A–Z</option>
+    <option value="symbol-desc">Symbol Z–A</option>
+    <option value="score-desc">Score high to low</option>
+</select>
 
 <div class="table-wrap">
 <table id="activeTable">
@@ -341,6 +347,7 @@ const CONFIG = {
 
 const symbols = new Map();
 const activeCoins = new Map();
+let sortMode = "symbol-asc";
 
 let candidateSymbols = new Set();
 let activitySubscriptions = new Set();
@@ -2072,6 +2079,19 @@ function renderMarketRow(
 }
 
 
+function compareCoinRows(a, b) {
+    const bySymbol = a.item.symbol.localeCompare(b.item.symbol);
+    if (sortMode === "symbol-desc") {
+        return -bySymbol;
+    }
+    if (sortMode === "score-desc") {
+        const scoreA = a.metrics?.score ?? -Infinity;
+        const scoreB = b.metrics?.score ?? -Infinity;
+        return scoreB - scoreA || bySymbol;
+    }
+    return bySymbol;
+}
+
 function renderActiveCoins(now) {
     const current = [];
     const historical = [];
@@ -2089,12 +2109,8 @@ function renderActiveCoins(now) {
         }
     }
 
-    const byScore = (a, b) =>
-        (b.metrics?.score ?? -Infinity) -
-        (a.metrics?.score ?? -Infinity);
-    current.sort(byScore);
-    historical.sort((a, b) =>
-        b.record.lastActiveAt - a.record.lastActiveAt);
+    current.sort(compareCoinRows);
+    historical.sort(compareCoinRows);
 
     const rowsHtml = (rows, emptyMessage) =>
         rows.length
@@ -2150,11 +2166,7 @@ function renderCandidates() {
     }
 
 
-    ranked.sort(
-        (a, b) =>
-            (b.metrics.score ?? -Infinity) -
-            (a.metrics.score ?? -Infinity)
-    );
+    ranked.sort(compareCoinRows);
 
 
     const rows =
@@ -2294,6 +2306,11 @@ function refreshMarket() {
     render(now);
 }
 
+
+document.getElementById("sortMode").addEventListener("change", event => {
+    sortMode = event.target.value;
+    render(Date.now());
+});
 
 connectDiscovery();
 connectActivity();
