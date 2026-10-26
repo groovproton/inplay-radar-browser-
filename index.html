@@ -258,6 +258,12 @@ const CONFIG = {
     candidateRefreshMs:
         10_000,
 
+    recentlyActiveCandidateHoldMs:
+        120_000,
+
+    discoveryStaleMs:
+        15_000,
+
     diagnosticIntervalMs:
         10_000,
 
@@ -332,6 +338,9 @@ let activityRetryCount = 0;
 
 let subscriptionRequestId = 1;
 let lastCandidateRefreshAt = 0;
+let lastDiscoveryMessageAt = null;
+let lastActivityMessageAt = null;
+const pendingSubscriptionRequests = new Map();
 
 const diagnostics = {
     discoveryMessages: 0,
@@ -646,15 +655,10 @@ function activityTotalsSince(item, cutoff) {
 
 function activityRatio(
     recentActivity,
-    totalActivity,
+    previousActivity,
     baselineDurationMs
 ) {
-    const previousActivity =
-        Math.max(
-            0,
-            totalActivity - recentActivity
-        );
-
+    // The second argument already excludes the most recent 10 seconds.
     const averagePrevious10s =
         baselineDurationMs > 0
             ? previousActivity /
@@ -1209,7 +1213,11 @@ function updateStatus() {
         activitySocket?.readyState === WebSocket.OPEN;
 
     document.getElementById("status").textContent =
-        `Discovery ${discoveryConnected ? "connected" : "disconnected"}` +
+        `Discovery ${discoveryConnected
+            ? lastDiscoveryMessageAt === null ||
+                Date.now() - lastDiscoveryMessageAt > CONFIG.discoveryStaleMs
+                ? "STALE" : "connected"
+            : "disconnected"}` +
         ` | Activity ${activityConnected ? "connected" : "disconnected"}` +
         ` | Candidates ${candidateSymbols.size}` +
         ` | Subscribed ${activitySubscriptions.size}` +
@@ -1345,9 +1353,18 @@ function updateCandidates(now) {
                 ? 0
                 : now - item.candidateEnteredAt;
 
+        const lastActiveAt =
+            activeCoins.get(symbol)?.lastActiveAt ?? null;
+
+        const recentlyActive =
+            lastActiveAt !== null &&
+            now - lastActiveAt <
+                CONFIG.recentlyActiveCandidateHoldMs;
+
         if (
             rank <= CONFIG.candidateExitRank ||
-            residenceMs < CONFIG.candidateMinResidenceMs
+            residenceMs < CONFIG.candidateMinResidenceMs ||
+            recentlyActive
         ) {
             nextCandidates.add(symbol);
         }
@@ -1403,16 +1420,29 @@ function sendSubscriptionChange(method, symbolsToChange) {
         return;
     }
 
-    activitySocket.send(
-        JSON.stringify({
-            method,
-            params:
-                symbolsToChange.map(symbol =>
-                    `${symbol.toLowerCase()}@aggTrade`
-                ),
-            id: subscriptionRequestId++
-        })
-    );
+    const id = subscriptionRequestId++;
+    const request = {
+        method,
+        symbols: [...symbolsToChange]
+    };
+
+    pendingSubscriptionRequests.set(id, request);
+
+    try {
+        activitySocket.send(
+            JSON.stringify({
+                method,
+                params:
+                    symbolsToChange.map(symbol =>
+                        `${symbol.toLowerCase()}@aggTrade`
+                    ),
+                id
+            })
+        );
+    } catch (error) {
+        pendingSubscriptionRequests.delete(id);
+        console.error("Subscription send failed", error);
+    }
 }
 
 
@@ -1424,16 +1454,28 @@ function syncActivitySubscriptions() {
         return;
     }
 
+    const pendingAdds = new Set();
+    const pendingRemovals = new Set();
+
+    for (const request of pendingSubscriptionRequests.values()) {
+        const target = request.method === "SUBSCRIBE"
+            ? pendingAdds
+            : pendingRemovals;
+        for (const symbol of request.symbols) {
+            target.add(symbol);
+        }
+    }
+
     const added =
-        [...candidateSymbols].filter(
-            symbol =>
-                !activitySubscriptions.has(symbol)
+        [...candidateSymbols].filter(symbol =>
+            !activitySubscriptions.has(symbol) &&
+            !pendingAdds.has(symbol)
         );
 
     const removed =
-        [...activitySubscriptions].filter(
-            symbol =>
-                !candidateSymbols.has(symbol)
+        [...activitySubscriptions].filter(symbol =>
+            !candidateSymbols.has(symbol) &&
+            !pendingRemovals.has(symbol)
         );
 
     sendSubscriptionChange(
@@ -1449,35 +1491,18 @@ function syncActivitySubscriptions() {
     const now = Date.now();
 
     for (const symbol of removed) {
-        activitySubscriptions.delete(symbol);
-
         const item = symbols.get(symbol);
-
         if (item) {
-            pruneActivity(item, now);
             item.activityUnsubscribedAt = now;
         }
     }
 
     for (const symbol of added) {
-        activitySubscriptions.add(symbol);
-
         const item = symbols.get(symbol);
-
         if (item) {
-            pruneActivity(item, now);
-
-            const canReuseHistory =
-                item.activityStartedAt !== null &&
-                item.activityUnsubscribedAt !== null &&
-                now - item.activityUnsubscribedAt <=
-                    CONFIG.activityHistoryMs;
-
-            if (!canReuseHistory) {
-                resetActivity(item, now);
-            } else {
-                item.activityUnsubscribedAt = null;
-            }
+            // A newly selected symbol begins with an empty, continuous
+            // observation window. Never reuse data across unsubscription.
+            resetActivity(item, now);
         }
     }
 
@@ -1487,7 +1512,8 @@ function syncActivitySubscriptions() {
             {
                 subscribe: added.length,
                 unsubscribe: removed.length,
-                total: activitySubscriptions.size
+                confirmed: activitySubscriptions.size,
+                pending: pendingSubscriptionRequests.size
             }
         );
     }
@@ -1545,6 +1571,7 @@ function connectDiscovery() {
         }
 
         diagnostics.discoveryMessages++;
+        lastDiscoveryMessageAt = Date.now();
 
         if (!receivedFirstMessage) {
             receivedFirstMessage = true;
@@ -1667,6 +1694,8 @@ function connectActivity() {
 
         activityRetryCount = 0;
         activitySubscriptions.clear();
+        pendingSubscriptionRequests.clear();
+        lastActivityMessageAt = null;
 
         console.info(
             "Activity socket open",
@@ -1701,6 +1730,36 @@ function connectActivity() {
             );
         }
 
+        // Binance control responses have { result, id } or
+        // { code, msg, id }; they are not market-data events.
+        if (Number.isInteger(message.id)) {
+            const request =
+                pendingSubscriptionRequests.get(message.id);
+
+            if (request) {
+                pendingSubscriptionRequests.delete(message.id);
+
+                if (message.result === null &&
+                    message.code === undefined) {
+                    for (const symbol of request.symbols) {
+                        if (request.method === "SUBSCRIBE") {
+                            activitySubscriptions.add(symbol);
+                        } else {
+                            activitySubscriptions.delete(symbol);
+                        }
+                    }
+                } else {
+                    console.error(
+                        "Binance subscription rejected",
+                        request, message
+                    );
+                }
+
+                syncActivitySubscriptions();
+            }
+            return;
+        }
+
         const data = message.data || message;
 
         if (data.e !== "aggTrade") {
@@ -1729,6 +1788,7 @@ function connectActivity() {
         }
 
         const receivedAt = Date.now();
+        lastActivityMessageAt = receivedAt;
 
         addActivityEvent(item, {
             timestamp,
@@ -1768,6 +1828,8 @@ function connectActivity() {
 
         activitySocket = null;
         activitySubscriptions.clear();
+        pendingSubscriptionRequests.clear();
+        lastActivityMessageAt = null;
 
         for (const symbol of candidateSymbols) {
             const item = symbols.get(symbol);
@@ -1861,6 +1923,24 @@ function updateMarketMetrics(now) {
 
         item.metrics =
             calculateMetrics(item, now);
+
+        // Keep discovery and subscription health separate from a market
+        // with legitimately zero aggTrades during a quiet interval.
+        const discoveryFresh =
+            lastDiscoveryMessageAt !== null &&
+            now - lastDiscoveryMessageAt <= CONFIG.discoveryStaleMs;
+        const subscribed =
+            activitySubscriptions.has(symbol);
+
+        if (!discoveryFresh || !subscribed) {
+            item.metrics.confidence = "WARMUP";
+            item.metrics.score = null;
+            item.metrics.scoreComponents = null;
+            item.stateScore = null;
+            item.marketState = "QUIET";
+            item.pendingState = null;
+            item.pendingStateSince = null;
+        }
 
         updateStateScore(
             item,
@@ -2191,6 +2271,7 @@ function logDiagnostics() {
 function refreshMarket() {
     const now = Date.now();
 
+    updateStatus();
     updateMarketMetrics(now);
     updateActiveCoins(now);
     render(now);
